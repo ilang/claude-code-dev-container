@@ -1,0 +1,16 @@
+# .allowed-domains belongs in your project directory, not here
+.allowed-domains
+
+# Claude Code local settings (contains user-specific permission rules)
+.claude/settings.local.json
+
+# Editor swap/backup files
+*.swp
+*.swo
+*~
+
+# Environment files (may contain secrets)
+.env
+
+# macOS metadata
+.DS_Store

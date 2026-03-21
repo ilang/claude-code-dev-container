@@ -1,0 +1,402 @@
+#!/bin/bash
+# claude-sandbox — run Claude Code in a secure, persistent Docker container.
+#
+# This is the main script you run from your Mac. It manages Docker containers
+# that run Claude Code inside a locked-down Linux environment with a firewall.
+#
+# How it works:
+#   1. You cd into a project directory on your Mac
+#   2. You run `claude-sandbox`
+#   3. The script creates (or reattaches to) a Docker container for that project
+#   4. Your project directory is mounted into the container at /workspace
+#   5. The container's firewall restricts Claude to only approved domains
+#
+# Usage:
+#   cd /path/to/your/project
+#   claude-sandbox                        # persistent container for current dir
+#   claude-sandbox my-subproject   # with subfolder (for monorepos)
+#   claude-sandbox --temp                 # ephemeral container (deleted on exit)
+#   claude-sandbox --new                  # fresh persistent container
+#   claude-sandbox --list                 # show all containers
+#   claude-sandbox --stop                 # stop this project's container
+#   claude-sandbox --rm                   # remove this project's container
+#   claude-sandbox -h                     # show help
+
+# Safety flags:
+#   -e          exit immediately if any command fails
+#   -u          treat unset variables as errors (catches typos)
+#   -o pipefail if any command in a pipeline fails, the whole pipeline fails
+set -euo pipefail
+
+# The name of the Docker image to use. Built from the Dockerfile via:
+#   docker build -t claude-sandbox .
+IMAGE_NAME="claude-sandbox"
+
+# --- Helper Functions ---
+
+usage() {
+    cat <<'EOF'
+Usage: claude-sandbox [flags] [subfolder]
+
+Run Claude Code in a secure container with a locked-down firewall.
+Default: persistent container per project folder.
+
+Flags:
+  --new           Remove existing container and create a fresh one
+  --temp          Ephemeral container (deleted on exit)
+  --open-network  No firewall — full internet access
+  --locked        Whitelist only — no runtime domain additions
+  --no-install    Disable package installation (sudo install-package.sh)
+  --list          Show all claude-sandbox containers
+  --stop          Stop this project's container
+  --rm            Remove this project's container
+  -h, --help      Show this help
+
+Examples:
+  claude-sandbox                        # start/reattach persistent container
+  claude-sandbox my-subproject   # with subfolder (monorepo)
+  claude-sandbox --temp                 # one-off session, deleted on exit
+  claude-sandbox --new                  # fresh container for this project
+  claude-sandbox --list                 # see all containers and their status
+EOF
+}
+
+# Derive a deterministic container name from the current directory.
+# Uses the last 3 path components + a short hash for uniqueness, e.g.:
+#   /home/user/work/my-monorepo → claude-sandbox-work-my-monorepo-a1b2c3d4
+# The hash ensures two directories with the same last 3 components get different names.
+# Docker names can only contain lowercase letters, numbers, and hyphens.
+container_name() {
+    local dir="$(pwd)"
+
+    # Take last 3 path components (e.g., /a/b/c/d/e → c/d/e)
+    local tail_path
+    tail_path=$(echo "$dir" | rev | cut -d'/' -f1-3 | rev)
+
+    # Sanitize: lowercase, replace non-alphanumeric with hyphens, collapse, trim
+    local sanitized
+    sanitized=$(echo "$tail_path" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+    # Short hash of the full path for uniqueness
+    local hash
+    if command -v md5 &>/dev/null; then
+        hash=$(echo -n "$dir" | md5 | head -c 8)        # macOS
+    else
+        hash=$(echo -n "$dir" | md5sum | head -c 8)      # Linux
+    fi
+
+    echo "claude-sandbox-${sanitized}-${hash}"
+}
+
+# Check what state a container is in. Returns one of three values:
+#   "running" — container is up and executing
+#   "stopped" — container exists but isn't running (can be restarted)
+#   "missing" — no container with this name exists (need to create one)
+# Uses `docker inspect` to query the container's status.
+container_state() {
+    local name="$1"
+    local state
+    state=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "missing")
+    case "$state" in
+        running) echo "running" ;;
+        exited|created|dead) echo "stopped" ;;
+        *) echo "missing" ;;
+    esac
+}
+
+# Wait for the container to finish its startup (firewall setup, DNS resolution, etc.).
+# The entrypoint.sh script creates a sentinel file (/tmp/.claude-sandbox-ready) when
+# it's done. We poll for that file every second, with a 120-second timeout.
+# This prevents us from trying to use the container before the firewall is active.
+# Streams the container logs in real-time so you can see firewall setup progress,
+# just like you would in --temp mode.
+wait_for_ready() {
+    local name="$1"
+    local timeout=120
+
+    # Stream container logs in the background so the user sees firewall progress.
+    # The & runs it as a background process; we kill it once the container is ready.
+    docker logs -f --tail 0 "$name" 2>&1 &
+    local logs_pid=$!
+
+    local elapsed=0
+    while ! docker exec "$name" test -f /tmp/.claude-sandbox-ready 2>/dev/null; do
+        if [ $elapsed -ge $timeout ]; then
+            kill $logs_pid 2>/dev/null || true
+            echo "ERROR: Container setup timed out after ${timeout}s"
+            echo "Check logs: docker logs $name"
+            exit 1
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    # Stop streaming logs once the container is ready
+    kill $logs_pid 2>/dev/null || true
+    wait $logs_pid 2>/dev/null || true
+}
+
+# Launch a Claude Code session inside an already-running container.
+# Uses `docker exec -it` to open an interactive terminal (-it) inside the container,
+# start a zsh shell, cd to the right directory, and run Claude.
+# This is how you get multiple sessions into the same persistent container.
+exec_claude() {
+    local name="$1"
+    local subfolder="$2"
+    local workdir="/workspace"
+    if [ -n "$subfolder" ]; then
+        workdir="/workspace/$subfolder"
+    fi
+    docker exec -it "$name" /bin/zsh -c "cd '$workdir' && exec claude --dangerously-skip-permissions"
+}
+
+# --- Argument parsing ---
+# Defaults: persistent mode, no subfolder, no special action, default network (firewall)
+MODE="persistent"   # "persistent" or "temp"
+SUBFOLDER=""        # optional subfolder within /workspace (for monorepos)
+ACTION=""           # management actions: "new", "list", "stop", "rm", "help"
+NETWORK="default"   # "default" (firewall), "open" (no firewall), "locked" (whitelist only)
+NO_INSTALL=""       # set to "1" by --no-install flag
+
+# Loop through all command-line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --new)  ACTION="new"; shift ;;      # destroy and recreate container
+        --temp) MODE="temp"; shift ;;       # one-shot container, deleted on exit
+        --open-network) NETWORK="open"; shift ;;     # no firewall, full internet
+        --locked)       NETWORK="locked"; shift ;;  # whitelist only, no runtime additions
+        --no-install)   NO_INSTALL="1"; shift ;;    # disable package installation
+        --list) ACTION="list"; shift ;;     # show all claude-sandbox containers
+        --stop) ACTION="stop"; shift ;;     # stop this project's container
+        --rm)   ACTION="rm"; shift ;;       # remove this project's container
+        -h|--help) ACTION="help"; shift ;;
+        -*) echo "Unknown flag: $1"; usage; exit 1 ;;
+        *)  SUBFOLDER="$1"; shift ;;        # anything else is treated as a subfolder name
+    esac
+done
+
+# --- Validate subfolder name ---
+# The subfolder is embedded in a shell command passed to zsh -c inside the container.
+# To prevent shell injection, only allow safe characters: letters, numbers, hyphens,
+# underscores, dots, and forward slashes (for nested paths like "src/main").
+if [[ -n "$SUBFOLDER" && "$SUBFOLDER" =~ [^a-zA-Z0-9._/-] ]]; then
+    echo "Error: subfolder name contains invalid characters: $SUBFOLDER"
+    echo "Only letters, numbers, hyphens, underscores, dots, and slashes are allowed."
+    exit 1
+fi
+
+# --- Dispatch management commands ---
+# Handle management actions first. These all exit immediately after completing.
+# The "new" action is special — it removes the old container then falls through
+# to the persistent creation flow below.
+
+case "$ACTION" in
+    help)
+        usage
+        exit 0
+        ;;
+    list)
+        # Show all containers created by claude-sandbox (identified by their label).
+        # Displays container name, status (running/exited), and which project directory it's for.
+        echo "Claude Sandbox containers:"
+        echo ""
+        docker ps -a \
+            --filter "label=claude-sandbox.project-path" \
+            --format "table {{.Names}}\t{{.Status}}\t{{.Label \"claude-sandbox.project-path\"}}"
+        exit 0
+        ;;
+    stop)
+        # Stop (but don't delete) the container for the current directory.
+        # The container can be restarted later by running claude-sandbox again.
+        CONTAINER_NAME=$(container_name)
+        if docker stop "$CONTAINER_NAME" 2>/dev/null; then
+            echo "Stopped: $CONTAINER_NAME"
+        else
+            echo "Container $CONTAINER_NAME is not running."
+        fi
+        exit 0
+        ;;
+    rm)
+        # Forcefully remove the container for the current directory.
+        # This deletes the container entirely; a fresh one will be created next time.
+        CONTAINER_NAME=$(container_name)
+        if docker rm -f "$CONTAINER_NAME" 2>/dev/null; then
+            echo "Removed: $CONTAINER_NAME"
+        else
+            echo "Container $CONTAINER_NAME does not exist."
+        fi
+        exit 0
+        ;;
+    new)
+        # Remove the existing container and fall through to create a fresh one.
+        # Useful when you want a clean slate (e.g., after changing the Dockerfile).
+        CONTAINER_NAME=$(container_name)
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+        echo "Removed old container. Creating fresh..."
+        # Fall through to persistent run below
+        ;;
+esac
+
+# --- Host config mounts ---
+# Mount host config files read-only (:ro) so entrypoint.sh can copy/merge them in.
+HOST_MOUNTS=()
+
+# Claude Code statusline and settings
+if [ -f "$HOME/.claude/statusline-command.sh" ]; then
+    HOST_MOUNTS+=(-v "$HOME/.claude/statusline-command.sh:/host-claude-config/statusline-command.sh:ro")
+fi
+if [ -f "$HOME/.claude/settings.json" ]; then
+    HOST_MOUNTS+=(-v "$HOME/.claude/settings.json:/host-claude-config/settings.json:ro")
+fi
+
+# Claude Code plugins — sync from host so container has the same plugins
+if [ -d "$HOME/.claude/plugins" ]; then
+    HOST_MOUNTS+=(-v "$HOME/.claude/plugins:/host-claude-config/plugins:ro")
+fi
+
+# Claude Code user memory — preferences, feedback, personal context
+# Low risk (just things like "user prefers concise answers"), not project-specific.
+if [ -d "$HOME/.claude/memory" ]; then
+    HOST_MOUNTS+=(-v "$HOME/.claude/memory:/host-claude-config/memory:ro")
+fi
+
+# Git config — so git inside the container knows your name, email, and aliases
+if [ -f "$HOME/.gitconfig" ]; then
+    HOST_MOUNTS+=(-v "$HOME/.gitconfig:/home/node/.gitconfig:ro")
+fi
+
+# SSH agent forwarding — lets the container use your SSH keys for git push/pull
+# without exposing the actual private key files to the container.
+# On macOS, the SSH agent socket is at a special Docker path.
+SSH_MOUNTS=()
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS Docker Desktop provides a magic path for SSH agent forwarding
+        SSH_MOUNTS+=(-v /run/host-services/ssh-auth.sock:/ssh-agent:ro)
+        SSH_MOUNTS+=(-e SSH_AUTH_SOCK=/ssh-agent)
+    else
+        # Linux: mount the actual socket
+        SSH_MOUNTS+=(-v "$SSH_AUTH_SOCK:/ssh-agent:ro")
+        SSH_MOUNTS+=(-e SSH_AUTH_SOCK=/ssh-agent)
+    fi
+fi
+
+# --- Detect host timezone ---
+# Pass the host's timezone to the container so dates/times match.
+# If TZ is already set in the environment, use that. Otherwise detect from the OS.
+if [ -z "${TZ:-}" ]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS: /etc/localtime is a symlink to the timezone file
+        TZ=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||') || true
+    elif [ -f /etc/timezone ]; then
+        # Linux (Debian/Ubuntu)
+        TZ=$(cat /etc/timezone) || true
+    elif command -v timedatectl &>/dev/null; then
+        # Linux (systemd)
+        TZ=$(timedatectl show -p Timezone --value 2>/dev/null) || true
+    fi
+fi
+TZ="${TZ:-UTC}"
+
+# --- Create .allowed-domains if it doesn't exist ---
+# If the project doesn't have an .allowed-domains file yet, copy the default
+# template from this repo. This gives new users a working whitelist (GitHub, npm,
+# VS Code) out of the box. They can customize it later.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -f "$(pwd)/.allowed-domains" ] && [ -f "$SCRIPT_DIR/allowed-domains.default" ]; then
+    cp "$SCRIPT_DIR/allowed-domains.default" "$(pwd)/.allowed-domains"
+    echo "Created .allowed-domains with default whitelist (GitHub, npm, VS Code)."
+    echo "Edit $(pwd)/.allowed-domains to customize."
+fi
+
+# --- Network capabilities ---
+# The firewall (default and --locked) needs NET_ADMIN and NET_RAW to configure
+# iptables rules. With --open-network, no firewall is set up, so no caps needed.
+CAP_ARGS=()
+if [ "$NETWORK" != "open" ]; then
+    CAP_ARGS+=(--cap-add=NET_ADMIN --cap-add=NET_RAW)
+fi
+
+# --- Temp mode ---
+# Temp mode creates a throwaway container. When Claude exits, the container is
+# automatically deleted (--rm). Good for one-off tasks where you don't need
+# the container to stick around.
+#
+# Key docker flags:
+#   -it         interactive + allocate a terminal (so you can type in Claude)
+#   --rm        automatically remove the container when it stops
+#   --cap-add   grant network capabilities so the firewall scripts can work
+#   -v          mount volumes: project code, config, credentials, history
+#   -e          set environment variables inside the container
+#   --label     metadata tags so `--list` can find and describe this container
+
+if [ "$MODE" = "temp" ]; then
+    docker run -it --rm \
+        ${CAP_ARGS[@]+"${CAP_ARGS[@]}"} \
+        -v "$(pwd)":/workspace \
+        -v claude-code-config:/home/node/.claude \
+        -v claude-code-json:/home/node/.claude-json \
+        -v claude-code-history:/commandhistory \
+        ${HOST_MOUNTS[@]+"${HOST_MOUNTS[@]}"} \
+        ${SSH_MOUNTS[@]+"${SSH_MOUNTS[@]}"} \
+        -e CLAUDE_MODE=temp \
+        -e CLAUDE_NETWORK="$NETWORK" \
+        -e CLAUDE_NO_INSTALL="$NO_INSTALL" \
+        -e CLAUDE_SUBFOLDER="$SUBFOLDER" \
+        -e TZ="$TZ" \
+        --label "claude-sandbox.mode=temp" \
+        --label "claude-sandbox.project-path=$(pwd)" \
+        "$IMAGE_NAME"
+    exit 0
+fi
+
+# --- Persistent mode ---
+# Persistent mode keeps the container alive between sessions. Running
+# `claude-sandbox` again from the same directory will reattach to the existing
+# container instead of creating a new one. This is faster (no firewall re-setup)
+# and preserves any in-session state (environment variables, running processes, etc.).
+
+CONTAINER_NAME=$(container_name)
+STATE=$(container_state "$CONTAINER_NAME")
+
+case "$STATE" in
+    running)
+        # Container already running — just open a new Claude session inside it.
+        # This is the fast path: no setup needed, instant attach.
+        echo "Attaching to running container: $CONTAINER_NAME"
+        exec_claude "$CONTAINER_NAME" "$SUBFOLDER"
+        ;;
+    stopped)
+        # Container exists but was stopped (e.g., after `docker stop` or a reboot).
+        # Restart it — the entrypoint.sh will run again to set up the firewall.
+        echo "Restarting container: $CONTAINER_NAME"
+        docker start "$CONTAINER_NAME" > /dev/null
+        wait_for_ready "$CONTAINER_NAME"
+        exec_claude "$CONTAINER_NAME" "$SUBFOLDER"
+        ;;
+    missing)
+        # No container exists for this directory yet — create one from scratch.
+        # -d runs it in detached mode (background). The entrypoint.sh sets up the
+        # firewall and then waits indefinitely. We then exec into it to run Claude.
+        echo "Creating container: $CONTAINER_NAME"
+        docker run -d \
+            --name "$CONTAINER_NAME" \
+            --hostname "$CONTAINER_NAME" \
+            ${CAP_ARGS[@]+"${CAP_ARGS[@]}"} \
+            -v "$(pwd)":/workspace \
+            -v claude-code-config:/home/node/.claude \
+            -v claude-code-json:/home/node/.claude-json \
+            -v claude-code-history:/commandhistory \
+            ${HOST_MOUNTS[@]+"${HOST_MOUNTS[@]}"} \
+            ${SSH_MOUNTS[@]+"${SSH_MOUNTS[@]}"} \
+            -e CLAUDE_MODE=persistent \
+            -e CLAUDE_NETWORK="$NETWORK" \
+            -e CLAUDE_NO_INSTALL="$NO_INSTALL" \
+            -e TZ="$TZ" \
+            --label "claude-sandbox.mode=persistent" \
+            --label "claude-sandbox.project-path=$(pwd)" \
+            "$IMAGE_NAME" > /dev/null
+        wait_for_ready "$CONTAINER_NAME"
+        exec_claude "$CONTAINER_NAME" "$SUBFOLDER"
+        ;;
+esac

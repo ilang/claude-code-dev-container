@@ -1,0 +1,23 @@
+# .allowed-domains — domains to whitelist on container startup
+#
+# Copy this file to your project root as .allowed-domains and customize.
+# One domain per line. Lines starting with # are comments.
+#
+# These domains are loaded automatically when the container starts.
+# In --locked mode, these are the ONLY domains allowed (besides Anthropic API).
+# In default mode, you can also approve additional domains at runtime.
+#
+# To remove a domain you don't need, delete or comment out the line.
+
+# --- Package registries ---
+registry.npmjs.org
+deb.debian.org
+
+# --- Code hosting ---
+github.com
+api.github.com
+
+# --- VS Code services (only needed for VS Code Dev Container approach) ---
+marketplace.visualstudio.com
+vscode.blob.core.windows.net
+update.code.visualstudio.com
