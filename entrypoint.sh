@@ -30,12 +30,20 @@ if [ -d "$CLAUDE_JSON_VOLUME" ] && [ -f "$CLAUDE_JSON_VOLUME/.claude.json" ]; th
     fi
 fi
 
-# `trap ... EXIT` registers a cleanup function that runs when this script exits
-# (whether normally or due to an error). This saves credentials back to the shared
-# volume so the next container (temp or persistent) can pick them up.
+# Save credentials back to the shared volume so the next container can pick them up.
 # Only saves if our copy has login info (oauthAccount) — prevents a container with
 # bare/stale credentials from overwriting good ones if two containers exit at once.
-trap '[ -d "$CLAUDE_JSON_VOLUME" ] && [ -f "$CLAUDE_JSON" ] && grep -q "oauthAccount" "$CLAUDE_JSON" 2>/dev/null && cp "$CLAUDE_JSON" "$CLAUDE_JSON_VOLUME/.claude.json"' EXIT
+save_credentials() {
+    if [ -d "$CLAUDE_JSON_VOLUME" ] && [ -f "$CLAUDE_JSON" ] && \
+       grep -q "oauthAccount" "$CLAUDE_JSON" 2>/dev/null; then
+        cp "$CLAUDE_JSON" "$CLAUDE_JSON_VOLUME/.claude.json"
+    fi
+}
+
+# Register as an EXIT trap so credentials are saved when this script exits
+# (whether normally or due to an error). In persistent mode, we also register
+# SIGTERM/SIGINT traps to ensure this runs on `docker stop`.
+trap save_credentials EXIT
 
 # --- Sync statusline and settings from host ---
 # The host's Claude config files are mounted read-only at /host-claude-config/
@@ -106,9 +114,24 @@ fi
 # we're ready before the firewall is actually configured.
 rm -f /tmp/.claude-sandbox-ready
 
+# --- Flag overrides ---
+# When restarting an existing container with different flags (e.g., switching from
+# default to --open-network), the env vars are baked in from creation time.
+# The claude-sandbox script writes override files via `docker cp` before starting.
+# We read them here, then delete them (one-shot overrides).
+if [ -f /tmp/.claude-network-override ]; then
+    CLAUDE_NETWORK=$(cat /tmp/.claude-network-override)
+    rm -f /tmp/.claude-network-override
+    echo "Network mode overridden to: $CLAUDE_NETWORK"
+fi
+if [ -f /tmp/.claude-no-install-override ]; then
+    CLAUDE_NO_INSTALL=$(cat /tmp/.claude-no-install-override)
+    rm -f /tmp/.claude-no-install-override
+fi
+
 # --- Package installation flag ---
 # If --no-install was requested, write a flag file that init-firewall.sh reads.
-# init-firewall.sh (running as root) will remove apt-get from sudoers.
+# init-firewall.sh creates/removes /etc/claude-sandbox-no-install accordingly.
 rm -f /tmp/.claude-no-install
 if [ "${CLAUDE_NO_INSTALL:-}" = "1" ]; then
     touch /tmp/.claude-no-install
@@ -124,6 +147,15 @@ fi
 # init-firewall.sh). The .allowed-domains file ships with GitHub, npm, and
 # VS Code by default — users can remove entries they don't need.
 CLAUDE_NETWORK="${CLAUDE_NETWORK:-default}"
+
+# --- Save effective flags ---
+# Write the resolved flags to a config file so the host script (claude-sandbox) can
+# read the current state when reattaching. This file lives on the container's writable
+# layer (per-container, persists across stop/start). It replaces Docker labels as the
+# source of truth for the container's current settings.
+# This must come AFTER the defaults are applied above.
+echo "NETWORK=$CLAUDE_NETWORK" > "$HOME/.sandbox-config"
+echo "NO_INSTALL=${CLAUDE_NO_INSTALL:-0}" >> "$HOME/.sandbox-config"
 
 # Helper: load domains from .allowed-domains file into the firewall.
 # Uses allow-domain.sh (via sudo) which has root access to ipset.
@@ -175,13 +207,29 @@ touch /tmp/.claude-sandbox-ready
 if [ "$CLAUDE_MODE" = "persistent" ]; then
     # PERSISTENT MODE: The container stays running in the background indefinitely.
     # You attach to it later with `docker exec` (the claude-sandbox script does this).
-    # `tail -f /dev/null` is a common trick to keep a container alive — it just
-    # sits there reading from an empty file forever, using zero CPU.
-    # `exec` replaces this script's process with tail, so the container is clean.
+    #
+    # We run `tail -f /dev/null` in the background instead of using `exec` so that
+    # THIS shell remains PID 1. This is important because:
+    #   1. The EXIT/SIGTERM traps (save_credentials) need the shell alive to fire
+    #   2. When Docker stops the container, it sends SIGTERM to PID 1
+    #   3. The shell catches SIGTERM, saves credentials, then exits cleanly
+    #
+    # Previously `exec tail` replaced the shell entirely, so the EXIT trap was lost
+    # and credentials were never saved back to the shared volume.
+
+    # Catch SIGTERM/SIGINT (sent by `docker stop`) to save credentials before exiting.
+    # save_credentials is idempotent, so calling it from both SIGTERM and EXIT is safe.
+    trap 'save_credentials; exit 0' SIGTERM SIGINT
+
     echo ""
     echo "Container ready. Waiting for sessions..."
     echo ""
-    exec tail -f /dev/null
+
+    tail -f /dev/null &
+    TAIL_PID=$!
+    # wait returns non-zero (128+signal) when interrupted by a signal; || true prevents
+    # set -e from killing the script before the trap has a chance to run.
+    wait $TAIL_PID || true
 else
     # TEMP MODE: Launch Claude Code interactively right now.
     # The container will be deleted (--rm) when Claude exits.

@@ -19,12 +19,14 @@
 set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
 IFS=$'\n\t'       # Stricter word splitting (prevents issues with spaces in IPs)
 
-# If --no-install was requested, remove install-package.sh from sudoers.
-# The entrypoint writes /tmp/.claude-no-install before calling this script.
-# Once removed from sudoers, Claude can't reinstall it (sudoers is root-only).
+# If --no-install was requested, create a flag file that install-package.sh checks.
+# Unlike the previous approach (removing sudoers entries), this is reversible —
+# restarting without --no-install removes the flag file and re-enables installs.
 if [ -f /tmp/.claude-no-install ]; then
-    sed -i '/install-package/d' /etc/sudoers.d/node-firewall
-    echo "Package installation disabled (install-package.sh removed from sudoers)."
+    touch /etc/claude-sandbox-no-install
+    echo "Package installation disabled."
+else
+    rm -f /etc/claude-sandbox-no-install
 fi
 
 # STEP 1: Save Docker's internal DNS rules BEFORE we wipe everything.

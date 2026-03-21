@@ -95,9 +95,11 @@ This repo supports two ways to run Claude Code in a container:
 | `--open-network` | No firewall — full internet access (use with trusted code only) |
 | `--locked` | Whitelist only — no runtime domain additions |
 | `--no-install` | Disable package installation (`sudo install-package.sh`) |
+| `--relogin` | Re-authenticate Claude (logs in on host, syncs credentials) |
 | `--list` | Show all claude-sandbox containers and their status |
 | `--stop` | Stop the current project's container |
 | `--rm` | Remove the current project's container |
+| `--rm-all` | Remove ALL claude-sandbox containers |
 | `-h` | Show help |
 
 ### Persistent containers
@@ -109,6 +111,15 @@ The first time you run `claude-sandbox`, it creates a named container for your p
 - Container removed → creates a new one
 
 This means tools you install (`sudo install-package.sh python3`, `npm install -g`), and any files you create all persist between sessions. Note: session-only domain additions (option 2 in the chat prompt) are lost on restart — only domains added to `.allowed-domains` (option 1) survive.
+
+**Switching flags (macOS/Linux):** You can change `--open-network`, `--locked`, and `--no-install` on existing containers — the container will automatically restart with the new settings. For example, switching from default to open-network:
+
+```bash
+claude-sandbox --open-network    # restarts with firewall disabled
+claude-sandbox                   # restarts with firewall re-enabled
+```
+
+Note: switching from `--open-network` to a firewalled mode requires `--new` because open-network containers lack the kernel capabilities needed for iptables.
 
 ### Managing containers
 
@@ -185,6 +196,16 @@ When Claude hits a blocked domain, it asks you in the chat:
 > 3. **Skip** — find another way
 
 If you approve, Claude runs `sudo allow-domain.sh <domain>` to open it. This is advisory (relies on Claude following CLAUDE.md instructions). For untrusted code, use `--locked` mode which disables runtime additions entirely.
+
+### Re-authentication
+
+If your login token expires, use `--relogin` to re-authenticate on the host (which has unrestricted network) and sync the credentials to your containers:
+
+```bash
+claude-sandbox --relogin
+```
+
+This runs `claude --login` on your host machine, then copies the credentials to the shared Docker volume. All containers pick them up on the next session.
 
 ## Security model
 

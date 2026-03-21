@@ -47,9 +47,11 @@ Flags:
   --open-network  No firewall — full internet access
   --locked        Whitelist only — no runtime domain additions
   --no-install    Disable package installation (sudo install-package.sh)
+  --relogin       Re-authenticate Claude (logs in on host, syncs credentials)
   --list          Show all claude-sandbox containers
   --stop          Stop this project's container
   --rm            Remove this project's container
+  --rm-all        Remove ALL claude-sandbox containers
   -h, --help      Show this help
 
 Examples:
@@ -102,6 +104,89 @@ container_state() {
         exited|created|dead) echo "stopped" ;;
         *) echo "missing" ;;
     esac
+}
+
+# Read a config value from the container's ~/.sandbox-config file.
+# This file is written by entrypoint.sh on every start with the effective flags.
+# Works on both running and stopped containers.
+# Returns the value for the given key, or empty string if not found.
+container_config() {
+    local name="$1"
+    local key="$2"
+    local content=""
+
+    # Try docker exec first (running containers)
+    content=$(docker exec "$name" cat /home/node/.sandbox-config 2>/dev/null) || {
+        # Fall back to docker cp (stopped containers)
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        if docker cp "$name:/home/node/.sandbox-config" "$tmpdir/config" 2>/dev/null; then
+            content=$(cat "$tmpdir/config")
+        fi
+        rm -rf "$tmpdir"
+    }
+
+    echo "$content" | { grep "^${key}=" || true; } | head -1 | cut -d= -f2
+}
+
+# Write flag override files into a container so the entrypoint picks them up on start.
+# The entrypoint reads these files, applies the new values, and writes the effective
+# flags to ~/.sandbox-config (replacing the old values).
+# Only writes overrides if the requested flags differ from the container's current config.
+# Returns 0 if overrides were written (restart needed), 1 if no changes.
+write_flag_overrides() {
+    local name="$1"
+    local needs_restart=false
+
+    # Check network mode mismatch
+    local container_network
+    container_network=$(container_config "$name" "NETWORK")
+    if [ -n "$container_network" ] && [ "$container_network" != "$NETWORK" ]; then
+        # Containers created with --open-network lack NET_ADMIN/NET_RAW capabilities,
+        # which are required for iptables. Switching FROM open TO firewalled modes
+        # is impossible without recreating the container.
+        if [ "$container_network" = "open" ] && [ "$NETWORK" != "open" ]; then
+            echo ""
+            echo "Cannot switch from --open-network to '$NETWORK' mode."
+            echo "The container was created without firewall capabilities (NET_ADMIN/NET_RAW)."
+            echo "To use a firewalled mode, recreate the container:"
+            echo ""
+            echo "  claude-sandbox --new"
+            echo ""
+            exit 1
+        fi
+        echo "Switching network mode: $container_network → $NETWORK"
+        local tmpfile
+        tmpfile=$(mktemp)
+        echo "$NETWORK" > "$tmpfile"
+        docker cp "$tmpfile" "$name:/tmp/.claude-network-override"
+        rm -f "$tmpfile"
+        needs_restart=true
+    fi
+
+    # Check no-install mismatch
+    local container_no_install
+    container_no_install=$(container_config "$name" "NO_INSTALL")
+    local current_no_install="${NO_INSTALL:-0}"
+    if [ -n "$container_no_install" ] && [ "$container_no_install" != "$current_no_install" ]; then
+        if [ "$current_no_install" = "1" ]; then
+            echo "Switching package installation: enabled → disabled"
+        else
+            echo "Switching package installation: disabled → enabled"
+        fi
+        local tmpfile
+        tmpfile=$(mktemp)
+        echo "$current_no_install" > "$tmpfile"
+        docker cp "$tmpfile" "$name:/tmp/.claude-no-install-override"
+        rm -f "$tmpfile"
+        needs_restart=true
+    fi
+
+    if $needs_restart; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Wait for the container to finish its startup (firewall setup, DNS resolution, etc.).
@@ -166,9 +251,11 @@ while [[ $# -gt 0 ]]; do
         --open-network) NETWORK="open"; shift ;;     # no firewall, full internet
         --locked)       NETWORK="locked"; shift ;;  # whitelist only, no runtime additions
         --no-install)   NO_INSTALL="1"; shift ;;    # disable package installation
-        --list) ACTION="list"; shift ;;     # show all claude-sandbox containers
-        --stop) ACTION="stop"; shift ;;     # stop this project's container
-        --rm)   ACTION="rm"; shift ;;       # remove this project's container
+        --relogin)      ACTION="relogin"; shift ;;  # re-authenticate Claude
+        --list)   ACTION="list"; shift ;;     # show all claude-sandbox containers
+        --stop)   ACTION="stop"; shift ;;   # stop this project's container
+        --rm)     ACTION="rm"; shift ;;     # remove this project's container
+        --rm-all) ACTION="rm-all"; shift ;; # remove all claude-sandbox containers
         -h|--help) ACTION="help"; shift ;;
         -*) echo "Unknown flag: $1"; usage; exit 1 ;;
         *)  SUBFOLDER="$1"; shift ;;        # anything else is treated as a subfolder name
@@ -197,12 +284,20 @@ case "$ACTION" in
         ;;
     list)
         # Show all containers created by claude-sandbox (identified by their label).
-        # Displays container name, status (running/exited), and which project directory it's for.
+        # Uses `column -t` to auto-size columns based on content width, so long
+        # container names don't break the layout.
         echo "Claude Sandbox containers:"
         echo ""
-        docker ps -a \
-            --filter "label=claude-sandbox.project-path" \
-            --format "table {{.Names}}\t{{.Status}}\t{{.Label \"claude-sandbox.project-path\"}}"
+        {
+            echo "NAME|STATUS|NETWORK|PROJECT"
+            docker ps -a \
+                --filter "label=claude-sandbox.project-path" \
+                --format "{{.Names}}|{{.Status}}|{{.Label \"claude-sandbox.project-path\"}}" | \
+            while IFS='|' read -r cname cstatus cpath; do
+                net=$(container_config "$cname" "NETWORK")
+                echo "${cname}|${cstatus}|${net:--}|${cpath}"
+            done
+        } | column -t -s '|'
         exit 0
         ;;
     stop)
@@ -227,6 +322,19 @@ case "$ACTION" in
         fi
         exit 0
         ;;
+    rm-all)
+        # Remove ALL claude-sandbox containers across all projects.
+        CONTAINERS=$(docker ps -a --filter "label=claude-sandbox.project-path" --format "{{.Names}}")
+        if [ -z "$CONTAINERS" ]; then
+            echo "No claude-sandbox containers found."
+        else
+            echo "$CONTAINERS" | while read -r cname; do
+                docker rm -f "$cname" > /dev/null
+                echo "Removed: $cname"
+            done
+        fi
+        exit 0
+        ;;
     new)
         # Remove the existing container and fall through to create a fresh one.
         # Useful when you want a clean slate (e.g., after changing the Dockerfile).
@@ -234,6 +342,21 @@ case "$ACTION" in
         docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
         echo "Removed old container. Creating fresh..."
         # Fall through to persistent run below
+        ;;
+    relogin)
+        # Re-authenticate by logging in on the HOST (which has unrestricted network),
+        # then syncing the credentials to the shared Docker volume. This avoids the
+        # complexity of temporarily disabling the container's firewall.
+        echo "Logging in on host (no firewall restrictions)..."
+        claude --login
+        # Sync the host's credentials to the shared Docker volume.
+        # Uses a throwaway Alpine container to copy the file into the volume.
+        docker run --rm \
+            -v claude-code-json:/vol \
+            -v "$HOME/.claude.json":/src:ro \
+            alpine cp /src /vol/.claude.json
+        echo "Credentials synced. Containers will pick them up on next session."
+        exit 0
         ;;
 esac
 
@@ -361,14 +484,26 @@ STATE=$(container_state "$CONTAINER_NAME")
 
 case "$STATE" in
     running)
-        # Container already running — just open a new Claude session inside it.
-        # This is the fast path: no setup needed, instant attach.
-        echo "Attaching to running container: $CONTAINER_NAME"
+        # Container already running. Check if flags match — if not, stop and restart
+        # with new settings so the user gets what they asked for.
+        if write_flag_overrides "$CONTAINER_NAME"; then
+            # Flags changed — need to restart for the entrypoint to apply them.
+            # The override files are already written inside the container.
+            echo "Restarting container to apply new settings: $CONTAINER_NAME"
+            docker stop "$CONTAINER_NAME" > /dev/null
+            # The entrypoint clears the readiness sentinel on start, so
+            # wait_for_ready will correctly wait for the new setup to complete.
+            docker start "$CONTAINER_NAME" > /dev/null
+            wait_for_ready "$CONTAINER_NAME"
+        else
+            echo "Attaching to running container: $CONTAINER_NAME"
+        fi
         exec_claude "$CONTAINER_NAME" "$SUBFOLDER"
         ;;
     stopped)
         # Container exists but was stopped (e.g., after `docker stop` or a reboot).
-        # Restart it — the entrypoint.sh will run again to set up the firewall.
+        # Write any flag overrides before starting, so the entrypoint picks them up.
+        write_flag_overrides "$CONTAINER_NAME" || true
         echo "Restarting container: $CONTAINER_NAME"
         docker start "$CONTAINER_NAME" > /dev/null
         wait_for_ready "$CONTAINER_NAME"

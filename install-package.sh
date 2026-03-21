@@ -13,6 +13,15 @@ if [ $# -eq 0 ]; then
     exit 1
 fi
 
+# Check if package installation has been disabled via --no-install flag.
+# This flag file is created/removed by init-firewall.sh on each container start,
+# making it reversible (unlike the previous approach of removing sudoers entries).
+if [ -f /etc/claude-sandbox-no-install ]; then
+    echo "Error: package installation is disabled (--no-install mode)."
+    echo "Restart without --no-install to re-enable."
+    exit 1
+fi
+
 # Validate all arguments are package names (no flags or special characters).
 # Package names can only contain lowercase letters, numbers, hyphens, dots, and plus signs.
 for arg in "$@"; do
