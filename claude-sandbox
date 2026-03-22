@@ -47,7 +47,6 @@ Flags:
   --open-network  No firewall — full internet access
   --locked        Whitelist only — no runtime domain additions
   --no-install    Disable package installation (sudo install-package.sh)
-  --relogin       Re-authenticate Claude (logs in on host, syncs credentials)
   --list          Show all claude-sandbox containers
   --stop          Stop this project's container
   --rm            Remove this project's container
@@ -251,7 +250,6 @@ while [[ $# -gt 0 ]]; do
         --open-network) NETWORK="open"; shift ;;     # no firewall, full internet
         --locked)       NETWORK="locked"; shift ;;  # whitelist only, no runtime additions
         --no-install)   NO_INSTALL="1"; shift ;;    # disable package installation
-        --relogin)      ACTION="relogin"; shift ;;  # re-authenticate Claude
         --list)   ACTION="list"; shift ;;     # show all claude-sandbox containers
         --stop)   ACTION="stop"; shift ;;   # stop this project's container
         --rm)     ACTION="rm"; shift ;;     # remove this project's container
@@ -342,21 +340,6 @@ case "$ACTION" in
         docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
         echo "Removed old container. Creating fresh..."
         # Fall through to persistent run below
-        ;;
-    relogin)
-        # Re-authenticate by logging in on the HOST (which has unrestricted network),
-        # then syncing the credentials to the shared Docker volume. This avoids the
-        # complexity of temporarily disabling the container's firewall.
-        echo "Logging in on host (no firewall restrictions)..."
-        claude --login
-        # Sync the host's credentials to the shared Docker volume.
-        # Uses a throwaway Alpine container to copy the file into the volume.
-        docker run --rm \
-            -v claude-code-json:/vol \
-            -v "$HOME/.claude.json":/src:ro \
-            alpine cp /src /vol/.claude.json
-        echo "Credentials synced. Containers will pick them up on next session."
-        exit 0
         ;;
 esac
 

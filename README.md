@@ -95,7 +95,6 @@ This repo supports two ways to run Claude Code in a container:
 | `--open-network` | No firewall — full internet access (use with trusted code only) |
 | `--locked` | Whitelist only — no runtime domain additions |
 | `--no-install` | Disable package installation (`sudo install-package.sh`) |
-| `--relogin` | Re-authenticate Claude (logs in on host, syncs credentials) |
 | `--list` | Show all claude-sandbox containers and their status |
 | `--stop` | Stop the current project's container |
 | `--rm` | Remove the current project's container |
@@ -199,13 +198,7 @@ If you approve, Claude runs `sudo allow-domain.sh <domain>` to open it. This is 
 
 ### Re-authentication
 
-If your login token expires, use `--relogin` to re-authenticate on the host (which has unrestricted network) and sync the credentials to your containers:
-
-```bash
-claude-sandbox --relogin
-```
-
-This runs `claude --login` on your host machine, then copies the credentials to the shared Docker volume. All containers pick them up on the next session.
+Login credentials are stored on a shared Docker volume (`claude-code-json`). When Claude prompts you to log in, it happens inside the container — the token is stored directly in `~/.claude.json` (no OS keychain). Since all containers share the same volume via a symlink, logging in once makes all containers authenticated.
 
 ## Security model
 

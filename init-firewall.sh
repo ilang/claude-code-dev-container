@@ -119,6 +119,7 @@ ipset create allowed-domains hash:net 2>/dev/null || true
 # Why each domain is needed:
 #   api.anthropic.com               — Claude Code's API (the AI backend)
 #   claude.ai                       — authentication
+#   platform.claude.com             — Claude Code platform services
 #   downloads.claude.ai             — auto-update downloads
 #   storage.googleapis.com          — auto-update downloads (legacy, being deprecated)
 #   sentry.io                       — error reporting for Claude Code
@@ -138,6 +139,7 @@ echo "Resolving essential domains..."
 for domain in \
     "api.anthropic.com" \
     "claude.ai" \
+    "platform.claude.com" \
     "downloads.claude.ai" \
     "storage.googleapis.com" \
     "sentry.io" \

@@ -29,7 +29,7 @@ if "%~1"=="--temp" ( set MODE=temp   & shift & goto :parse_args )
 if "%~1"=="--open-network" ( set NETWORK=open & shift & goto :parse_args )
 if "%~1"=="--locked"       ( set NETWORK=locked & shift & goto :parse_args )
 if "%~1"=="--no-install"   ( set NO_INSTALL=1 & shift & goto :parse_args )
-if "%~1"=="--relogin" ( set ACTION=relogin & shift & goto :parse_args )
+REM (--relogin was removed: login happens inside the container naturally)
 if "%~1"=="--list"    ( set ACTION=list & shift & goto :parse_args )
 if "%~1"=="--stop"    ( set ACTION=stop & shift & goto :parse_args )
 if "%~1"=="--rm"      ( set ACTION=rm   & shift & goto :parse_args )
@@ -99,7 +99,7 @@ if "%ACTION%"=="list"    goto :do_list
 if "%ACTION%"=="stop"    goto :do_stop
 if "%ACTION%"=="rm"      goto :do_rm
 if "%ACTION%"=="rm-all"  goto :do_rm_all
-if "%ACTION%"=="relogin" goto :do_relogin
+REM (relogin action removed)
 if "%ACTION%"=="new"     goto :do_new
 
 if "%MODE%"=="temp" goto :run_temp
@@ -119,7 +119,6 @@ echo   --temp          Ephemeral container (deleted on exit)
 echo   --open-network  No firewall — full internet access
 echo   --locked        Whitelist only — no runtime domain additions
 echo   --no-install    Disable package installation (sudo install-package.sh)
-echo   --relogin       Re-authenticate Claude (logs in on host, syncs credentials)
 echo   --list          Show all claude-sandbox containers
 echo   --stop          Stop this project's container
 echo   --rm            Remove this project's container
@@ -154,15 +153,6 @@ for /f "tokens=*" %%c in ('docker ps -a --filter "label=claude-sandbox.project-p
     docker rm -f %%c >nul
     echo Removed: %%c
 )
-exit /b 0
-
-:do_relogin
-REM Re-authenticate by logging in on the HOST (unrestricted network),
-REM then syncing credentials to the shared Docker volume.
-echo Logging in on host (no firewall restrictions)...
-claude --login
-docker run --rm -v claude-code-json:/vol -v "%USERPROFILE%\.claude.json":/src:ro alpine cp /src /vol/.claude.json
-echo Credentials synced. Containers will pick them up on next session.
 exit /b 0
 
 :do_new

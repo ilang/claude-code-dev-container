@@ -11,39 +11,20 @@ set -e  # Exit immediately if any command fails
 CLAUDE_MODE="${CLAUDE_MODE:-temp}"
 
 # --- .claude.json shared credentials ---
-# Problem: Claude Code stores your login token in ~/.claude.json. In temp mode,
-# that file is destroyed when the container exits. In persistent mode, each
-# container has its own copy. We need credentials to survive across all containers.
+# Claude Code stores login tokens in ~/.claude.json. We need this to persist
+# across all containers so you only log in once.
 #
-# Solution: A shared Docker volume (claude-code-json) mounted at ~/.claude-json
-# acts as a "credential vault". On startup we restore from it; on exit we save to it.
+# Solution: A shared Docker volume is mounted at ~/.claude-json. We symlink
+# ~/.claude.json → ~/.claude-json/.claude.json so Claude reads/writes directly
+# to the shared volume. All containers see changes instantly — no copying needed.
 CLAUDE_JSON_VOLUME="$HOME/.claude-json"
 CLAUDE_JSON="$HOME/.claude.json"
 
-# Restore credentials from the shared volume if:
-#   - The shared volume exists and has a saved copy, AND
-#   - The local copy is missing or doesn't contain login info ("oauthAccount")
-if [ -d "$CLAUDE_JSON_VOLUME" ] && [ -f "$CLAUDE_JSON_VOLUME/.claude.json" ]; then
-    if [ ! -f "$CLAUDE_JSON" ] || ! grep -q "oauthAccount" "$CLAUDE_JSON" 2>/dev/null; then
-        cp "$CLAUDE_JSON_VOLUME/.claude.json" "$CLAUDE_JSON"
-        echo "Restored Claude credentials from shared store."
-    fi
+if [ -d "$CLAUDE_JSON_VOLUME" ]; then
+    # Remove any existing file (from a previous non-symlink setup) and create the symlink.
+    rm -f "$CLAUDE_JSON"
+    ln -sf "$CLAUDE_JSON_VOLUME/.claude.json" "$CLAUDE_JSON"
 fi
-
-# Save credentials back to the shared volume so the next container can pick them up.
-# Only saves if our copy has login info (oauthAccount) — prevents a container with
-# bare/stale credentials from overwriting good ones if two containers exit at once.
-save_credentials() {
-    if [ -d "$CLAUDE_JSON_VOLUME" ] && [ -f "$CLAUDE_JSON" ] && \
-       grep -q "oauthAccount" "$CLAUDE_JSON" 2>/dev/null; then
-        cp "$CLAUDE_JSON" "$CLAUDE_JSON_VOLUME/.claude.json"
-    fi
-}
-
-# Register as an EXIT trap so credentials are saved when this script exits
-# (whether normally or due to an error). In persistent mode, we also register
-# SIGTERM/SIGINT traps to ensure this runs on `docker stop`.
-trap save_credentials EXIT
 
 # --- Sync statusline and settings from host ---
 # The host's Claude config files are mounted read-only at /host-claude-config/
@@ -208,18 +189,8 @@ if [ "$CLAUDE_MODE" = "persistent" ]; then
     # PERSISTENT MODE: The container stays running in the background indefinitely.
     # You attach to it later with `docker exec` (the claude-sandbox script does this).
     #
-    # We run `tail -f /dev/null` in the background instead of using `exec` so that
-    # THIS shell remains PID 1. This is important because:
-    #   1. The EXIT/SIGTERM traps (save_credentials) need the shell alive to fire
-    #   2. When Docker stops the container, it sends SIGTERM to PID 1
-    #   3. The shell catches SIGTERM, saves credentials, then exits cleanly
-    #
-    # Previously `exec tail` replaced the shell entirely, so the EXIT trap was lost
-    # and credentials were never saved back to the shared volume.
-
-    # Catch SIGTERM/SIGINT (sent by `docker stop`) to save credentials before exiting.
-    # save_credentials is idempotent, so calling it from both SIGTERM and EXIT is safe.
-    trap 'save_credentials; exit 0' SIGTERM SIGINT
+    # We need PID 1 to handle SIGTERM so `docker stop` shuts down cleanly.
+    trap 'exit 0' SIGTERM SIGINT
 
     echo ""
     echo "Container ready. Waiting for sessions..."
