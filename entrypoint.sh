@@ -1,6 +1,6 @@
 #!/bin/bash
 # entrypoint.sh — the startup script that runs every time the container launches.
-# It handles: credential sharing, statusline sync, firewall setup, domain loading,
+# It handles: credential sharing, memory sync, firewall setup, domain loading,
 # and then either keeps the container alive (persistent mode) or launches Claude (temp mode).
 
 set -e  # Exit immediately if any command fails
@@ -26,59 +26,19 @@ if [ -d "$CLAUDE_JSON_VOLUME" ]; then
     ln -sf "$CLAUDE_JSON_VOLUME/.claude.json" "$CLAUDE_JSON"
 fi
 
-# --- Sync statusline and settings from host ---
-# The host's Claude config files are mounted read-only at /host-claude-config/
-# (see the claude-sandbox script for the -v mounts). This copies your host's
-# statusline script and settings into the container so the Claude UI matches.
-#
-# The statusline is the custom info bar at the bottom of Claude Code's terminal UI.
-if [ -f /host-claude-config/statusline-command.sh ]; then
-    cp /host-claude-config/statusline-command.sh "$HOME/.claude/statusline-command.sh"
-fi
-# For settings.json: if the container already has settings, we merge ONLY the
-# statusLine section from the host (using jq). This preserves container-specific
-# settings while keeping your statusline config in sync.
-# If no container settings exist yet, just copy the whole file from the host.
-if [ -f /host-claude-config/settings.json ]; then
-    CONTAINER_SETTINGS="$HOME/.claude/settings.json"
-    if [ -f "$CONTAINER_SETTINGS" ]; then
-        jq -s '.[0] * {statusLine: .[1].statusLine, enabledPlugins: .[1].enabledPlugins}' "$CONTAINER_SETTINGS" /host-claude-config/settings.json > "$CONTAINER_SETTINGS.tmp" && mv "$CONTAINER_SETTINGS.tmp" "$CONTAINER_SETTINGS"
-    else
-        cp /host-claude-config/settings.json "$CONTAINER_SETTINGS"
-    fi
-fi
+# --- CLAUDE.md rules ---
+# Copy the container rules file from the staging location into the volume.
+# The Dockerfile stages it at /usr/local/share/claude-sandbox/ because the volume
+# mount at ~/.claude shadows the image contents after first creation. Copying on
+# every start ensures updates to container-CLAUDE.md propagate after image rebuilds.
+cp /usr/local/share/claude-sandbox/CLAUDE.md "$HOME/.claude/CLAUDE.md" 2>/dev/null || true
 
-# --- Sync plugins from host ---
-# If the host's plugins directory is mounted, copy plugins into the container.
-# The installed_plugins.json has hardcoded host paths (e.g., /Users/yourname/.claude/...),
-# so we rewrite them to the container's home directory (/home/node/.claude/...).
-if [ -d /host-claude-config/plugins ]; then
-    CONTAINER_PLUGINS="$HOME/.claude/plugins"
-    mkdir -p "$CONTAINER_PLUGINS"
-
-    # Copy plugin cache (the actual plugin files)
-    if [ -d /host-claude-config/plugins/cache ]; then
-        cp -r /host-claude-config/plugins/cache "$CONTAINER_PLUGINS/" 2>/dev/null || true
-    fi
-
-    # Copy and rewrite installed_plugins.json — replace host home path with container home path
-    if [ -f /host-claude-config/plugins/installed_plugins.json ]; then
-        # Detect the host's home directory from the install paths in the JSON
-        HOST_HOME=$(jq -r '.plugins[][0].installPath // empty' /host-claude-config/plugins/installed_plugins.json 2>/dev/null | head -1 | sed 's|/.claude/.*||')
-        if [ -n "$HOST_HOME" ]; then
-            sed "s|$HOST_HOME|$HOME|g" /host-claude-config/plugins/installed_plugins.json > "$CONTAINER_PLUGINS/installed_plugins.json"
-        else
-            cp /host-claude-config/plugins/installed_plugins.json "$CONTAINER_PLUGINS/"
-        fi
-    fi
-
-    # Copy other plugin config files
-    for f in config.json known_marketplaces.json blocklist.json; do
-        if [ -f "/host-claude-config/plugins/$f" ]; then
-            cp "/host-claude-config/plugins/$f" "$CONTAINER_PLUGINS/" 2>/dev/null || true
-        fi
-    done
-fi
+# --- Settings, plugins, and statusline ---
+# These are managed independently inside the container. The claude-code-config
+# volume (mounted at ~/.claude) persists them across container restarts, so you
+# only need to configure once — same model as credentials.
+# Host settings are NOT synced because they may contain platform-specific config
+# (e.g., hooks calling powershell.exe, Windows paths) that breaks in Linux.
 
 # --- Sync user memory from host ---
 # User memory contains preferences, feedback, and personal context (e.g., "user prefers

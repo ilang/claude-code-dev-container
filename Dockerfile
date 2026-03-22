@@ -132,9 +132,10 @@ RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/
 # This puts the `claude` command on the PATH via ~/.local/bin.
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Copy the CLAUDE.md rules file into the container. This file tells Claude Code
-# how to behave inside the sandbox (e.g., how to handle blocked domains).
-COPY CLAUDE.md /home/node/.claude/CLAUDE.md
+# Copy the CLAUDE.md rules file to a staging location. It can't go directly into
+# /home/node/.claude/ because that path is shadowed by the claude-code-config
+# Docker volume at runtime. The entrypoint copies it into the volume on every start.
+COPY container-CLAUDE.md /usr/local/share/claude-sandbox/CLAUDE.md
 
 # Copy our custom scripts into the container:
 #   init-firewall.sh — sets up iptables rules to restrict network access

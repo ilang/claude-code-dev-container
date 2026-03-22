@@ -345,20 +345,10 @@ esac
 
 # --- Host config mounts ---
 # Mount host config files read-only (:ro) so entrypoint.sh can copy/merge them in.
+# Settings, plugins, and statusline are NOT synced from the host — they may contain
+# platform-specific config (hooks, paths) that breaks in the Linux container.
+# These are managed independently inside the container via the claude-code-config volume.
 HOST_MOUNTS=()
-
-# Claude Code statusline and settings
-if [ -f "$HOME/.claude/statusline-command.sh" ]; then
-    HOST_MOUNTS+=(-v "$HOME/.claude/statusline-command.sh:/host-claude-config/statusline-command.sh:ro")
-fi
-if [ -f "$HOME/.claude/settings.json" ]; then
-    HOST_MOUNTS+=(-v "$HOME/.claude/settings.json:/host-claude-config/settings.json:ro")
-fi
-
-# Claude Code plugins — sync from host so container has the same plugins
-if [ -d "$HOME/.claude/plugins" ]; then
-    HOST_MOUNTS+=(-v "$HOME/.claude/plugins:/host-claude-config/plugins:ro")
-fi
 
 # Claude Code user memory — preferences, feedback, personal context
 # Low risk (just things like "user prefers concise answers"), not project-specific.

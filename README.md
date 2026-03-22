@@ -29,7 +29,7 @@ A Docker-based sandbox with a **managed firewall**. Domains are locked down by d
 **Additional features:**
 - **Persistent containers** — tools, history, and firewall rules survive between sessions
 - **Per-project allowed domains** — `.allowed-domains` file auto-loads on startup
-- **Host config sync** — git identity, SSH agent, Claude plugins, and statusline
+- **Host config sync** — git identity, SSH agent, and user memory
 - **Cross-platform** — macOS, Linux, and Windows
 - **VS Code integration** — optional [Dev Container approach](README-vscode.md) with `/ide` command
 
@@ -209,7 +209,7 @@ This setup is designed for running `claude --dangerously-skip-permissions` safel
 | **Firewall** | Blocks outbound traffic to non-whitelisted domains | Linux kernel (iptables) | No |
 | **DNS blocking** | DNS blocked for Claude; approved domains resolved via /etc/hosts | Linux kernel (iptables + uid match) | No |
 | **Limited sudo** | Only specific scripts can run as root (no raw `apt-get`) | Linux sudoers | No |
-| **Container isolation** | Claude can only access mounted volumes (project, config, plugins) | Docker | No |
+| **Container isolation** | Claude can only access mounted volumes (project, config) | Docker | No |
 | **`--locked` mode** | Disables runtime domain additions entirely | Lock file (root-owned) | No |
 | **Domain approval (default mode)** | Claude asks before opening domains | CLAUDE.md instructions | Yes (advisory) |
 
@@ -242,13 +242,12 @@ The `claude-sandbox` script automatically shares from your host machine (read-on
 
 - **Git config** (`~/.gitconfig`) — your name, email, aliases
 - **SSH agent** — forwarded so `git push/pull` works over SSH without exposing private keys
-- **Claude plugins** — synced from `~/.claude/plugins/`
 - **User memory** — your preferences and feedback from `~/.claude/memory/`
-- **Statusline** — your custom statusline script and settings
 - **Login credentials** — shared via a Docker volume so you don't re-authenticate per container
 
-**Not shared** (intentionally, for security):
+**Not shared** (intentionally):
 
+- **Settings, plugins, statusline** — managed independently inside the container via the `claude-code-config` volume. Host settings may contain platform-specific config (hooks calling `powershell.exe`, Windows paths) that breaks in the Linux container. Configure these once inside any container — the volume persists them.
 - **Session history** — conversations stay separate between host and container (different file paths make them incompatible)
 - **Project memory** — Claude's learned context about specific projects stays on the host. Sharing it would expose cross-project information to containers running untrusted code.
 
@@ -265,7 +264,8 @@ claude-code-dev-container/
 ├── lock-network.sh         # Creates the lock file for --locked mode (can only lock, never unlock)
 ├── block-dns.sh            # Blocks DNS for the node user (anti-tunneling)
 ├── install-package.sh      # Safe apt-get wrapper (validates package names, no flags)
-├── CLAUDE.md               # Rules baked into the image (tells Claude to use allow-domain.sh)
+├── CLAUDE.md               # Project development guide (for working on this repo)
+├── container-CLAUDE.md     # Rules baked into the image (tells Claude to use allow-domain.sh)
 ├── devcontainer.json       # VS Code Dev Containers config (for the VS Code approach)
 ├── .upstream-version       # Tracks which Anthropic commit we last synced from
 ├── allowed-domains.default # Default whitelist, auto-copied to projects as .allowed-domains

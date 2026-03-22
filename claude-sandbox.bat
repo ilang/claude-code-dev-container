@@ -22,21 +22,22 @@ set NETWORK=default
 set NO_INSTALL=
 
 REM --- Parse arguments ---
+REM NOTE: set "VAR=value" quoting is critical — without quotes, trailing spaces
+REM before & are included in the value, breaking all comparisons downstream.
 :parse_args
 if "%~1"=="" goto :done_args
-if "%~1"=="--new"  ( set ACTION=new  & shift & goto :parse_args )
-if "%~1"=="--temp" ( set MODE=temp   & shift & goto :parse_args )
-if "%~1"=="--open-network" ( set NETWORK=open & shift & goto :parse_args )
-if "%~1"=="--locked"       ( set NETWORK=locked & shift & goto :parse_args )
-if "%~1"=="--no-install"   ( set NO_INSTALL=1 & shift & goto :parse_args )
-REM (--relogin was removed: login happens inside the container naturally)
-if "%~1"=="--list"    ( set ACTION=list & shift & goto :parse_args )
-if "%~1"=="--stop"    ( set ACTION=stop & shift & goto :parse_args )
-if "%~1"=="--rm"      ( set ACTION=rm   & shift & goto :parse_args )
-if "%~1"=="--rm-all"  ( set ACTION=rm-all & shift & goto :parse_args )
-if "%~1"=="-h"     ( set ACTION=help & shift & goto :parse_args )
-if "%~1"=="--help" ( set ACTION=help & shift & goto :parse_args )
-set SUBFOLDER=%~1
+if "%~1"=="--new"  ( set "ACTION=new" & shift & goto :parse_args )
+if "%~1"=="--temp" ( set "MODE=temp" & shift & goto :parse_args )
+if "%~1"=="--open-network" ( set "NETWORK=open" & shift & goto :parse_args )
+if "%~1"=="--locked"       ( set "NETWORK=locked" & shift & goto :parse_args )
+if "%~1"=="--no-install"   ( set "NO_INSTALL=1" & shift & goto :parse_args )
+if "%~1"=="--list"    ( set "ACTION=list" & shift & goto :parse_args )
+if "%~1"=="--stop"    ( set "ACTION=stop" & shift & goto :parse_args )
+if "%~1"=="--rm"      ( set "ACTION=rm" & shift & goto :parse_args )
+if "%~1"=="--rm-all"  ( set "ACTION=rm-all" & shift & goto :parse_args )
+if "%~1"=="-h"     ( set "ACTION=help" & shift & goto :parse_args )
+if "%~1"=="--help" ( set "ACTION=help" & shift & goto :parse_args )
+set "SUBFOLDER=%~1"
 shift
 goto :parse_args
 :done_args
@@ -59,10 +60,10 @@ if not "%SUBFOLDER%"=="" (
 )
 
 REM === Build host config mounts (only if files exist) ===
+REM Settings, plugins, and statusline are NOT synced from the host — they may contain
+REM platform-specific config (hooks, paths) that breaks in the Linux container.
+REM These are managed independently inside the container via the claude-code-config volume.
 set HOST_MOUNTS=
-if exist "%USERPROFILE%\.claude\statusline-command.sh" set HOST_MOUNTS=!HOST_MOUNTS! -v "%USERPROFILE%\.claude\statusline-command.sh":/host-claude-config/statusline-command.sh:ro
-if exist "%USERPROFILE%\.claude\settings.json" set HOST_MOUNTS=!HOST_MOUNTS! -v "%USERPROFILE%\.claude\settings.json":/host-claude-config/settings.json:ro
-if exist "%USERPROFILE%\.claude\plugins" set HOST_MOUNTS=!HOST_MOUNTS! -v "%USERPROFILE%\.claude\plugins":/host-claude-config/plugins:ro
 if exist "%USERPROFILE%\.claude\memory" set HOST_MOUNTS=!HOST_MOUNTS! -v "%USERPROFILE%\.claude\memory":/host-claude-config/memory:ro
 if exist "%USERPROFILE%\.gitconfig" set HOST_MOUNTS=!HOST_MOUNTS! -v "%USERPROFILE%\.gitconfig":/home/node/.gitconfig:ro
 

@@ -1,0 +1,7 @@
+# Force LF line endings for files that run inside the Linux container.
+# Without this, Windows git (core.autocrlf=true) converts to CRLF,
+# which breaks #!/bin/bash shebangs and causes "no such file or directory".
+*.sh text eol=lf
+Dockerfile text eol=lf
+claude-sandbox text eol=lf
+container-CLAUDE.md text eol=lf
