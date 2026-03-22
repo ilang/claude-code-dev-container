@@ -247,7 +247,7 @@ The `claude-sandbox` script automatically shares from your host machine (read-on
 
 **Not shared** (intentionally):
 
-- **Settings, plugins, statusline** — managed independently inside the container via the `claude-code-config` volume. Host settings may contain platform-specific config (hooks calling `powershell.exe`, Windows paths) that breaks in the Linux container. Configure these once inside any container — the volume persists them.
+- **Settings, plugins, statusline** — the container ships with its own defaults: a statusline showing container mode and context usage, and terminal bell notifications for Stop/Notification events. These are baked into the image and installed on first start. You can customize them inside the container — the `claude-code-config` volume persists changes. Host settings are not synced because they may contain platform-specific config (hooks calling `osascript`/`powershell.exe`, Windows paths).
 - **Session history** — conversations stay separate between host and container (different file paths make them incompatible)
 - **Project memory** — Claude's learned context about specific projects stays on the host. Sharing it would expose cross-project information to containers running untrusted code.
 
@@ -266,6 +266,8 @@ claude-code-dev-container/
 ├── install-package.sh      # Safe apt-get wrapper (validates package names, no flags)
 ├── CLAUDE.md               # Project development guide (for working on this repo)
 ├── container-CLAUDE.md     # Rules baked into the image (tells Claude to use allow-domain.sh)
+├── container-statusline.sh # Status line script baked into the image
+├── container-settings.json # Default settings baked into the image (statusline + bell notifications)
 ├── devcontainer.json       # VS Code Dev Containers config (for the VS Code approach)
 ├── .upstream-version       # Tracks which Anthropic commit we last synced from
 ├── allowed-domains.default # Default whitelist, auto-copied to projects as .allowed-domains

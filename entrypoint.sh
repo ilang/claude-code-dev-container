@@ -26,19 +26,21 @@ if [ -d "$CLAUDE_JSON_VOLUME" ]; then
     ln -sf "$CLAUDE_JSON_VOLUME/.claude.json" "$CLAUDE_JSON"
 fi
 
-# --- CLAUDE.md rules ---
-# Copy the container rules file from the staging location into the volume.
-# The Dockerfile stages it at /usr/local/share/claude-sandbox/ because the volume
-# mount at ~/.claude shadows the image contents after first creation. Copying on
-# every start ensures updates to container-CLAUDE.md propagate after image rebuilds.
-cp /usr/local/share/claude-sandbox/CLAUDE.md "$HOME/.claude/CLAUDE.md" 2>/dev/null || true
+# --- Container config files ---
+# The Dockerfile stages these at /usr/local/share/claude-sandbox/ because the volume
+# mount at ~/.claude shadows the image contents after first creation.
+DEFAULTS="/usr/local/share/claude-sandbox"
 
-# --- Settings, plugins, and statusline ---
-# These are managed independently inside the container. The claude-code-config
-# volume (mounted at ~/.claude) persists them across container restarts, so you
-# only need to configure once — same model as credentials.
-# Host settings are NOT synced because they may contain platform-specific config
-# (e.g., hooks calling powershell.exe, Windows paths) that breaks in Linux.
+# CLAUDE.md: always overwrite so image rebuilds propagate updates.
+cp "$DEFAULTS/CLAUDE.md" "$HOME/.claude/CLAUDE.md" 2>/dev/null || true
+
+# Statusline: always overwrite (same reason — updates propagate with image rebuilds).
+cp "$DEFAULTS/statusline-command.sh" "$HOME/.claude/statusline-command.sh" 2>/dev/null || true
+
+# Settings: seed only if missing. Don't overwrite — user may have customized inside container.
+if [ ! -f "$HOME/.claude/settings.json" ]; then
+    cp "$DEFAULTS/settings.json" "$HOME/.claude/settings.json" 2>/dev/null || true
+fi
 
 # --- Sync user memory from host ---
 # User memory contains preferences, feedback, and personal context (e.g., "user prefers
